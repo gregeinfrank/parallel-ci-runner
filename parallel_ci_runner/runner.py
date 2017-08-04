@@ -166,7 +166,7 @@ class Command(object):
             self.command_fn = command
         else:
             def wrapped_command(i):
-                return command
+                return [command]
             self.command_fn = wrapped_command
         self.stdout_callback = stdout_callback
 
