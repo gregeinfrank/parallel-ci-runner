@@ -5,7 +5,7 @@ from .docker_commands import (
     DockerBuildCommand, DockerCommand, DockerComposeCommand,
 )
 from .shell_commands import (
-    and_commands, SpecCommandInGroups,
+    and_commands, SpecCommandInGroups, SpecCommandInBatchSize
 )
 
 

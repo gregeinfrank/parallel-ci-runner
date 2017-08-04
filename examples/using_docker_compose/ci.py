@@ -4,7 +4,7 @@ from datetime import timedelta
 from functools import partial
 
 from parallel_ci_runner import (
-    CIRunner, DockerBuildCommand, DockerCommand, DockerComposeCommand, SpecCommandInGroups,
+    CIRunner, DockerBuildCommand, DockerCommand, DockerComposeCommand, SpecCommandInBatchSize,
 )
 
 ###
@@ -16,14 +16,15 @@ env_vars = {
 }
 docker_compose = DockerComposeCommand(env_vars=env_vars)
 docker_run = DockerCommand('exec', docker_compose.project_name_base)
-rspec_command = SpecCommandInGroups('rspec')
+rspec_command = SpecCommandInBatchSize('rspec')
 
 ###
 ### Generate lists of parallel commands
 ###
-NUM_PARALLEL = 4
+NUM_PARALLEL = 2
 up_cmds = [docker_compose.build('web', 'up -d') for _ in range(NUM_PARALLEL)]
-rspec_cmds = [docker_run.build(rspec_command.build(NUM_PARALLEL)) for _ in range(NUM_PARALLEL)]
+# rspec_cmds = [docker_run.build(rspec_command.build(NUM_PARALLEL)) for _ in range(NUM_PARALLEL)]
+rspec_cmds = [docker_run.build(rspec_command.build(1))]
 cleanup_commands = [docker_compose.cleanup() for _ in range(NUM_PARALLEL)]
 
 ###
@@ -36,6 +37,6 @@ runner.add_serial_command_step(
         docker_run.build("find . -name *_spec.rb | xargs wc -l | sed '$d' | sort -nr | awk '{print $2}'"),
         timedelta(minutes=1),
         stdout_callback=partial(rspec_command.load_specs, run_separately=['./spec/third_spec.rb']))
-runner.add_parallel_command_step(rspec_cmds, timedelta(minutes=1))
+runner.add_parallel_command_step(rspec_cmds, timedelta(minutes=1), num_parallel_workers=NUM_PARALLEL)
 runner.add_parallel_cleanup_step(cleanup_commands, timedelta(minutes=1))
 runner.run()

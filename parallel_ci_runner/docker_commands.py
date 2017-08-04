@@ -16,8 +16,8 @@ class DockerBuildCommand(object):
         def docker_build_command(process_num):
             build_arg_flags = " ".join(
                 "--build-arg {}='{}'".format(k, v) for k, v in self.build_args.items())
-            return "docker build -f {0} -t {1}:{2} {3} .".format(
-                self.dockerfile, self.docker_repo, self.tag, build_arg_flags)
+            return ["docker build -f {0} -t {1}:{2} {3} .".format(
+                self.dockerfile, self.docker_repo, self.tag, build_arg_flags)]
         return docker_build_command
 
     def full_image_name(self):
@@ -31,9 +31,10 @@ class DockerCommand(object):
 
     def build(self, cmd):
         def docker_command(process_num):
-            cmd_string = cmd(process_num) if hasattr(cmd, '__call__') else cmd
-            return "docker {0} {1}{2} {3}".format(
-                self.docker_command, self.container_name_prefix, process_num, cmd_string)
+            cmd_strings = cmd(process_num) if hasattr(cmd, '__call__') else [cmd]
+            return (lambda proc_num: "docker {0} {1}{2} {3}".format(
+                self.docker_command, self.container_name_prefix, proc_num, cmd_string)
+                for cmd_string in cmd_strings)
         return docker_command
 
 
@@ -74,12 +75,12 @@ class DockerComposeCommand(object):
             output += " {0}".format(app)
         if cmd_string:
             output += " {0}".format(cmd_string)
-        return output
+        return [output]
 
     def _cleanup_cmd(self, process_num):
         tmp = self._env_vars_prefix(process_num)
         tmp += self._compose_with_file_and_project_name(process_num)
-        return "{0} stop && {0} rm --force".format(tmp)
+        return ["{0} stop && {0} rm --force".format(tmp)]
 
     def _compose_with_file_and_project_name(self, process_num):
         output = "docker-compose"

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import subprocess
 import sys
 from threading import Thread
+from functools import partial
 import time
 try:
     from Queue import Queue, Empty
@@ -24,29 +25,40 @@ class CIRunner(object):
             string to be executed as a subcommand in a shell.
         """
         cmd = Command(command, stdout_callback=stdout_callback)
-        self.command_steps.append((1, [cmd], timeout))
+        self.command_steps.append(CommandStep([cmd], timeout=timeout))
 
-    def add_parallel_command_step(self, commands_list, timeout=None):
+    def add_parallel_command_step(self, commands_list, timeout=None, num_parallel_workers=None):
         cmd_list = [Command(c) for c in commands_list]
-        self.command_steps.append((len(cmd_list), cmd_list, timeout))
+        self.command_steps.append(CommandStep(cmd_list, timeout=timeout, num_parallel_workers=num_parallel_workers))
 
     def add_serial_cleanup_step(self, command, timeout=None):
         cmd = Command(command)
-        self.cleanup_steps.append((1, [cmd], timeout))
+        self.cleanup_steps.append(CommandStep([cmd], timeout=timeout))
 
     def add_parallel_cleanup_step(self, commands_list, timeout=None):
         cmd_list = [Command(c) for c in commands_list]
-        self.cleanup_steps.append((len(cmd_list), cmd_list, timeout))
+        self.cleanup_steps.append(CommandStep(cmd_list, timeout=timeout))
 
-    def _run_single(self, cmd_string):
-        return subprocess.Popen(
-            cmd_string,
-            shell=True,
-            stdout=subprocess.PIPE,
-        )
+    def _pending_procs(self, command_step):
+        for i, command in enumerate(command_step):
+            proc_num = i + 1
+            for cmd_string_or_func in command.command_fn(proc_num):
+                yield (cmd_string_or_func, command_step.timeout, command.stdout_callback)
 
-    def _run_command_step(self, command_step, step_num, num_steps, timeout,
-                          is_cleanup):
+    def _start_proc(self, proc_num, pending_procs, running_procs):
+        try:
+            cmd_string_or_func, timeout, stdout_callback = next(pending_procs)
+
+        except StopIteration:
+            return
+
+        cmd_string = cmd_string_or_func(proc_num) if hasattr(cmd_string_or_func, '__call__') else\
+            cmd_string_or_func
+        proc = Process.create(proc_num, cmd_string, timeout, stdout_callback)
+        logger.info("Command string: {}".format(cmd_string))
+        running_procs.append(proc)
+
+    def _run_command_step(self, command_step, step_num, num_steps, is_cleanup):
         self.log_step(step_num, num_steps, len(command_step), is_cleanup)
         procs = []
         tick_seconds = 1
@@ -54,20 +66,21 @@ class CIRunner(object):
         started_at = datetime.now()
         next_log_status_at = started_at + timedelta(seconds=log_status_every_seconds)
         # launch commands
-        for i, command in enumerate(command_step):
-            proc_num = i + 1
-            cmd_string = command.command_fn(proc_num)
-            proc = Process.create(proc_num, cmd_string, timeout, command.stdout_callback)
-            procs.append(proc)
-        pending_procs = procs
+        num_parallel_workers = command_step.num_parallel_workers
 
         # poll til completion or timeout
+        running_procs = []
+        pending_procs = self._pending_procs(command_step)
+        for i in range(num_parallel_workers):
+            logger.info("Starting initial proc {}".format(i+1))
+            self._start_proc(i+1, pending_procs, running_procs)
+
         while True:
-            for proc in pending_procs:
+            for proc in running_procs:
                 proc.update_status()
 
             # log results of any that have completed
-            newly_complete_procs = [proc for proc in pending_procs if proc.is_complete()]
+            newly_complete_procs = [proc for proc in running_procs if proc.is_complete()]
             for proc in newly_complete_procs:
                 if proc.started_reading_output:
                     proc.log_latest_output()
@@ -75,23 +88,27 @@ class CIRunner(object):
                 proc.log_result()
 
             # kill & log results for any procs past timeout
-            timed_out_procs = [proc for proc in pending_procs if proc.is_timed_out()]
+            timed_out_procs = [proc for proc in running_procs if proc.is_timed_out()]
             for proc in timed_out_procs:
                 if proc.started_reading_output:
                     proc.log_latest_output()
                 proc.kill()
                 proc.log_result()
 
-            # update pending_procs list for next loop tick
-            pending_procs = [proc for proc in procs if proc.is_pending()]
+            for proc in (timed_out_procs + newly_complete_procs):
+                procs.append(proc)
+                self._start_proc(proc.number, pending_procs, running_procs)
+
+            # update running_procs list for next loop tick
+            running_procs = [proc for proc in running_procs if proc.is_pending()]
 
             # exit if all proccesses have finished
-            if len(pending_procs) == 0:
+            if len(running_procs) == 0:
                 return procs
 
             # if only 1 proc still running, start logging its output in real time
-            if len(pending_procs) == 1:
-                pending_procs[0].log_latest_output()
+            if len(running_procs) == 1:
+                running_procs[0].log_latest_output()
 
             # Log time running if necessary, then sleep til next tick
             now = datetime.now()
@@ -104,10 +121,9 @@ class CIRunner(object):
 
     def run(self):
         num_steps = len(self.command_steps)
-        for i, command_step_tuple in enumerate(self.command_steps):
-            _, command_step, timeout = command_step_tuple
+        for i, command_step in enumerate(self.command_steps):
             procs = self._run_command_step(
-                command_step, i + 1, num_steps, timeout, False)
+                command_step, i + 1, num_steps, False)
             if not self.all_succeeded(procs):
                 logger.info("")
                 logger.info(format_with_colors(
@@ -119,10 +135,9 @@ class CIRunner(object):
 
     def _run_cleanup(self):
         num_steps = len(self.cleanup_steps)
-        for i, command_step_tuple in enumerate(self.cleanup_steps):
-            _, command_step, timeout = command_step_tuple
+        for i, command_step in enumerate(self.cleanup_steps):
             # in cleanup, run all steps regardless of if any previous ones fail
-            self._run_command_step(command_step, i + 1, num_steps, timeout, True)
+            self._run_command_step(command_step, i + 1, num_steps, True)
 
     @classmethod
     def all_succeeded(cls, procs):
@@ -154,6 +169,14 @@ class Command(object):
                 return command
             self.command_fn = wrapped_command
         self.stdout_callback = stdout_callback
+
+
+class CommandStep(list):
+
+    def __init__(self, lst, num_parallel_workers=None, timeout=None):
+        self.num_parallel_workers = len(lst) if num_parallel_workers is None else num_parallel_workers
+        self.timeout = timeout
+        list.__init__(self, lst)
 
 
 class Process(object):

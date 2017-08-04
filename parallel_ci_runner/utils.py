@@ -44,3 +44,12 @@ def format_with_colors(fmt_string, *args, **kwargs):
     }
     new_kwargs.update(kwargs)
     return fmt_string.format(*args, **new_kwargs)
+
+
+def ibatch(iterable, n=1):
+    """
+    An iterable to return batches of size n from `iterable`
+    """
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]

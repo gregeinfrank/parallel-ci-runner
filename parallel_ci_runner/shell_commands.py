@@ -1,4 +1,5 @@
 from functools import partial
+from utils import ibatch
 import sys
 
 
@@ -33,10 +34,43 @@ class SpecCommandInGroups(object):
 
     def _build_cmd(self, number, total_number):
         files = ' '.join(self._spec_groups(total_number)[number - 1])
-        return "{0} {1}".format(self.spec_command, files)
+        return ["{0} {1}".format(self.spec_command, files)]
 
     def build(self, total_number):
         return partial(self._build_cmd, total_number=total_number)
+
+
+class SpecCommandInBatchSize(object):
+    def __init__(self, spec_command):
+        self.spec_command = spec_command
+        self.specs_to_distribute = []
+        self.specs_to_run_separately = []
+
+    def load_specs(self, spec_files, run_separately=None):
+        if run_separately is None:
+            run_separately = []
+        _individual_for_own_procs = set([
+            f for specs in run_separately for f in specs.split()])
+
+        for sf in spec_files:
+            if sf not in _individual_for_own_procs:
+                self.specs_to_distribute.append(sf)
+        self.specs_to_run_separately.extend(run_separately)
+
+        # if we got no output, treat as failure and return False
+        return len(self.specs_to_distribute + self.specs_to_run_separately) > 0
+
+    def _build_cmd(self, number, batch_size):
+        for file in self.specs_to_run_separately:
+            yield "{0} {1}".format(self.spec_command, file)
+
+        # TODO: We don't want to batch adjacent files in this way - take the first with the last, etc
+        for batch in ibatch(self.specs_to_distribute, n=batch_size):
+            files = ' '.join(batch)
+            yield "{0} {1}".format(self.spec_command, files)
+
+    def build(self, batch_size):
+        return partial(self._build_cmd, batch_size=batch_size)
 
 
 def is_string(value):
